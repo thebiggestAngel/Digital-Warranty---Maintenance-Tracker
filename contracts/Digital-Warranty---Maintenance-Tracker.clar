@@ -4,10 +4,14 @@
 (define-constant ERR_WARRANTY_EXPIRED (err u103))
 (define-constant ERR_INVALID_DURATION (err u104))
 (define-constant ERR_NOT_OWNER (err u105))
+(define-constant ERR_RECALL_NOT_FOUND (err u106))
+(define-constant ERR_NOT_AUTHORIZED_MANUFACTURER (err u107))
+(define-constant ERR_RECALL_ALREADY_ACKNOWLEDGED (err u108))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var device-counter uint u0)
 (define-data-var service-counter uint u0)
+(define-data-var recall-counter uint u0)
 
 (define-map devices 
   { device-id: uint }
@@ -59,6 +63,35 @@
   { counter: uint }
 )
 
+(define-map authorized-manufacturers
+  { manufacturer: principal }
+  { authorized: bool }
+)
+
+(define-map device-recalls
+  { recall-id: uint }
+  {
+    issuer: principal,
+    manufacturer-name: (string-ascii 100),
+    affected-models: (list 5 (string-ascii 100)),
+    recall-reason: (string-ascii 500),
+    severity-level: (string-ascii 20),
+    issue-date: uint,
+    required-action: (string-ascii 300),
+    is-active: bool
+  }
+)
+
+(define-map device-recall-status
+  { device-id: uint, recall-id: uint }
+  {
+    acknowledged: bool,
+    acknowledged-date: (optional uint),
+    completed: bool,
+    completion-date: (optional uint)
+  }
+)
+
 (define-read-only (get-contract-owner)
   (var-get contract-owner)
 )
@@ -104,6 +137,32 @@
     device-data (is-eq (get owner device-data) user)
     false
   )
+)
+
+(define-read-only (get-recall-info (recall-id uint))
+  (map-get? device-recalls { recall-id: recall-id })
+)
+
+(define-read-only (is-device-affected-by-recall (device-id uint) (recall-id uint))
+  (match (map-get? devices { device-id: device-id })
+    device-data
+    (match (map-get? device-recalls { recall-id: recall-id })
+      recall-data
+      (let ((device-model (get model device-data))
+            (affected-models (get affected-models recall-data)))
+        (and (get is-active recall-data)
+             (is-some (index-of affected-models device-model))))
+      false)
+    false
+  )
+)
+
+(define-read-only (get-device-recall-status (device-id uint) (recall-id uint))
+  (map-get? device-recall-status { device-id: device-id, recall-id: recall-id })
+)
+
+(define-read-only (is-manufacturer-authorized (manufacturer principal))
+  (default-to false (get authorized (map-get? authorized-manufacturers { manufacturer: manufacturer })))
 )
 
 (define-public (register-device 
@@ -220,6 +279,101 @@
       (merge device-info { 
         warranty-duration: (+ (get warranty-duration device-info) additional-duration) 
       })
+    )
+    (ok true)
+  )
+)
+
+(define-public (authorize-manufacturer (manufacturer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (map-set authorized-manufacturers
+      { manufacturer: manufacturer }
+      { authorized: true }
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-manufacturer-authorization (manufacturer principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (map-set authorized-manufacturers
+      { manufacturer: manufacturer }
+      { authorized: false }
+    )
+    (ok true)
+  )
+)
+
+(define-public (issue-recall
+  (manufacturer-name (string-ascii 100))
+  (affected-models (list 5 (string-ascii 100)))
+  (recall-reason (string-ascii 500))
+  (severity-level (string-ascii 20))
+  (required-action (string-ascii 300)))
+  (let ((new-recall-id (+ (var-get recall-counter) u1)))
+    (asserts! (is-manufacturer-authorized tx-sender) ERR_NOT_AUTHORIZED_MANUFACTURER)
+    (map-set device-recalls
+      { recall-id: new-recall-id }
+      {
+        issuer: tx-sender,
+        manufacturer-name: manufacturer-name,
+        affected-models: affected-models,
+        recall-reason: recall-reason,
+        severity-level: severity-level,
+        issue-date: burn-block-height,
+        required-action: required-action,
+        is-active: true
+      }
+    )
+    (var-set recall-counter new-recall-id)
+    (ok new-recall-id)
+  )
+)
+
+(define-public (acknowledge-recall (device-id uint) (recall-id uint))
+  (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
+        (recall-info (unwrap! (map-get? device-recalls { recall-id: recall-id }) ERR_RECALL_NOT_FOUND))
+        (existing-status (map-get? device-recall-status { device-id: device-id, recall-id: recall-id })))
+    (asserts! (is-eq tx-sender (get owner device-info)) ERR_NOT_OWNER)
+    (asserts! (is-device-affected-by-recall device-id recall-id) ERR_NOT_AUTHORIZED)
+    (asserts! (is-none existing-status) ERR_RECALL_ALREADY_ACKNOWLEDGED)
+    (map-set device-recall-status
+      { device-id: device-id, recall-id: recall-id }
+      {
+        acknowledged: true,
+        acknowledged-date: (some burn-block-height),
+        completed: false,
+        completion-date: none
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (complete-recall (device-id uint) (recall-id uint))
+  (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
+        (recall-status (unwrap! (map-get? device-recall-status { device-id: device-id, recall-id: recall-id }) ERR_RECALL_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (get owner device-info)) ERR_NOT_OWNER)
+    (asserts! (get acknowledged recall-status) ERR_NOT_AUTHORIZED)
+    (map-set device-recall-status
+      { device-id: device-id, recall-id: recall-id }
+      (merge recall-status {
+        completed: true,
+        completion-date: (some burn-block-height)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (deactivate-recall (recall-id uint))
+  (let ((recall-info (unwrap! (map-get? device-recalls { recall-id: recall-id }) ERR_RECALL_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (get issuer recall-info)) ERR_NOT_AUTHORIZED)
+    (map-set device-recalls
+      { recall-id: recall-id }
+      (merge recall-info { is-active: false })
     )
     (ok true)
   )
