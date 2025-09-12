@@ -7,11 +7,13 @@
 (define-constant ERR_RECALL_NOT_FOUND (err u106))
 (define-constant ERR_NOT_AUTHORIZED_MANUFACTURER (err u107))
 (define-constant ERR_RECALL_ALREADY_ACKNOWLEDGED (err u108))
+(define-constant ERR_CLAIM_NOT_FOUND (err u109))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var device-counter uint u0)
 (define-data-var service-counter uint u0)
 (define-data-var recall-counter uint u0)
+(define-data-var claim-counter uint u0)
 
 (define-map devices 
   { device-id: uint }
@@ -92,6 +94,19 @@
   }
 )
 
+(define-map device-insurance-claims
+  { claim-id: uint }
+  {
+    device-id: uint,
+    claimant: principal,
+    claim-type: (string-ascii 100),
+    claim-amount: uint,
+    claim-date: uint,
+    status: (string-ascii 50),
+    resolution-date: (optional uint)
+  }
+)
+
 (define-read-only (get-contract-owner)
   (var-get contract-owner)
 )
@@ -155,6 +170,10 @@
       false)
     false
   )
+)
+
+(define-read-only (get-insurance-claim (claim-id uint))
+  (map-get? device-insurance-claims { claim-id: claim-id })
 )
 
 (define-read-only (get-device-recall-status (device-id uint) (recall-id uint))
@@ -347,6 +366,49 @@
         completed: false,
         completion-date: none
       }
+    )
+    (ok true)
+  )
+)
+
+(define-public (file-insurance-claim
+  (device-id uint)
+  (claim-type (string-ascii 100))
+  (claim-amount uint))
+  (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
+        (new-claim-id (+ (var-get claim-counter) u1)))
+    (asserts! (is-eq tx-sender (get owner device-info)) ERR_NOT_OWNER)
+    (map-set device-insurance-claims
+      { claim-id: new-claim-id }
+      {
+        device-id: device-id,
+        claimant: tx-sender,
+        claim-type: claim-type,
+        claim-amount: claim-amount,
+        claim-date: burn-block-height,
+        status: "pending",
+        resolution-date: none
+      }
+    )
+    (var-set claim-counter new-claim-id)
+    (ok new-claim-id)
+  )
+)
+
+(define-public (update-claim-status
+  (claim-id uint)
+  (new-status (string-ascii 50)))
+  (let ((claim-info (unwrap! (map-get? device-insurance-claims { claim-id: claim-id }) ERR_CLAIM_NOT_FOUND)))
+    (asserts! (or (is-eq tx-sender (get claimant claim-info))
+                  (is-eq tx-sender (var-get contract-owner))) ERR_NOT_AUTHORIZED)
+    (map-set device-insurance-claims
+      { claim-id: claim-id }
+      (merge claim-info {
+        status: new-status,
+        resolution-date: (if (or (is-eq new-status "approved") (is-eq new-status "denied"))
+                             (some burn-block-height)
+                             (get resolution-date claim-info))
+      })
     )
     (ok true)
   )
