@@ -453,3 +453,55 @@
 (define-private (get-transfer-record (transfer-id uint) (acc (list 5 { device-id: uint, transfer-id: uint, previous-owner: principal, new-owner: principal, transfer-date: uint, transfer-price: (optional uint) })))
   acc
 )
+
+(define-map warranty-claims
+  { claim-id: uint }
+  {
+    device-id: uint,
+    claimant: principal,
+    claim-date: uint,
+    claim-description: (string-ascii 300),
+    status: (string-ascii 50),
+    resolution-date: (optional uint)
+  }
+)
+
+(define-data-var warranty-claim-counter uint u0)
+
+(define-public (file-warranty-claim (device-id uint) (claim-description (string-ascii 300)))
+  (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
+        (new-claim-id (+ (var-get warranty-claim-counter) u1)))
+    (asserts! (is-eq tx-sender (get owner device-info)) ERR_NOT_OWNER)
+    (asserts! (is-warranty-valid device-id) ERR_WARRANTY_EXPIRED)
+    (map-set warranty-claims
+      { claim-id: new-claim-id }
+      {
+        device-id: device-id,
+        claimant: tx-sender,
+        claim-date: burn-block-height,
+        claim-description: claim-description,
+        status: "pending",
+        resolution-date: none
+      }
+    )
+    (var-set warranty-claim-counter new-claim-id)
+    (ok new-claim-id)
+  )
+)
+
+(define-public (update-warranty-claim-status (claim-id uint) (new-status (string-ascii 50)))
+  (let ((claim-info (unwrap! (map-get? warranty-claims { claim-id: claim-id }) ERR_CLAIM_NOT_FOUND)))
+    (asserts! (or (is-eq tx-sender (get claimant claim-info))
+                  (is-eq tx-sender (var-get contract-owner))) ERR_NOT_AUTHORIZED)
+    (map-set warranty-claims
+      { claim-id: claim-id }
+      (merge claim-info {
+        status: new-status,
+        resolution-date: (if (or (is-eq new-status "approved") (is-eq new-status "denied"))
+                             (some burn-block-height)
+                             (get resolution-date claim-info))
+      })
+    )
+    (ok true)
+  )
+)
