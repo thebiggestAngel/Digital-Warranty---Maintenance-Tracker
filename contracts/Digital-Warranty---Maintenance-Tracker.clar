@@ -184,6 +184,25 @@
   (default-to false (get authorized (map-get? authorized-manufacturers { manufacturer: manufacturer })))
 )
 
+(define-read-only (get-rental-info (rental-id uint))
+  (map-get? device-rentals { rental-id: rental-id })
+)
+
+(define-read-only (is-device-rented (device-id uint))
+  (let ((rental-info (map-get? device-rentals { rental-id: device-id })))
+    (match rental-info
+      rental-data (and (get is-active rental-data) (is-some (get renter rental-data)))
+      false
+    )
+  )
+)
+
+(define-read-only (get-device-rentals (device-id uint))
+  (let ((rentals (list)))
+    (fold check-rental-for-device (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) (list))
+  )
+)
+
 (define-public (register-device 
   (manufacturer (string-ascii 100))
   (model (string-ascii 100)) 
@@ -466,7 +485,36 @@
   }
 )
 
+(define-map device-rentals
+  { rental-id: uint }
+  {
+    device-id: uint,
+    owner: principal,
+    renter: (optional principal),
+    rental-price: uint,
+    rental-duration: uint,
+    rental-start: (optional uint),
+    rental-end: (optional uint),
+    is-active: bool
+  }
+)
+
+(define-map device-rental-status
+  { device-id: uint, rental-id: uint }
+  {
+    rented: bool,
+    rental-date: (optional uint),
+    return-date: (optional uint)
+  }
+)
+
+(define-map device-rental-active
+  { device-id: uint }
+  { is-rented: bool, current-rental-id: (optional uint) }
+)
+
 (define-data-var warranty-claim-counter uint u0)
+(define-data-var rental-counter uint u0)
 
 (define-public (file-warranty-claim (device-id uint) (claim-description (string-ascii 300)))
   (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
@@ -501,6 +549,93 @@
                              (some burn-block-height)
                              (get resolution-date claim-info))
       })
+    )
+    (ok true)
+  )
+)
+
+(define-public (list-device-for-rent (device-id uint) (rental-price uint) (rental-duration uint))
+  (let ((device-info (unwrap! (map-get? devices { device-id: device-id }) ERR_DEVICE_NOT_FOUND))
+        (new-rental-id (+ (var-get rental-counter) u1)))
+    (asserts! (is-eq tx-sender (get owner device-info)) ERR_NOT_OWNER)
+    (asserts! (> rental-price u0) ERR_INVALID_DURATION)
+    (asserts! (> rental-duration u0) ERR_INVALID_DURATION)
+    (map-set device-rentals
+      { rental-id: new-rental-id }
+      {
+        device-id: device-id,
+        owner: tx-sender,
+        renter: none,
+        rental-price: rental-price,
+        rental-duration: rental-duration,
+        rental-start: none,
+        rental-end: none,
+        is-active: true
+      }
+    )
+    (var-set rental-counter new-rental-id)
+    (ok new-rental-id)
+  )
+)
+
+(define-public (rent-device (rental-id uint))
+  (let ((rental-info (unwrap! (map-get? device-rentals { rental-id: rental-id }) ERR_CLAIM_NOT_FOUND))
+        (device-id (get device-id rental-info)))
+    (asserts! (get is-active rental-info) ERR_NOT_AUTHORIZED)
+    (asserts! (is-none (get renter rental-info)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-device-rented device-id)) ERR_NOT_AUTHORIZED)
+    (map-set device-rentals
+      { rental-id: rental-id }
+      (merge rental-info {
+        renter: (some tx-sender),
+        rental-start: (some burn-block-height),
+        rental-end: (some (+ burn-block-height (get rental-duration rental-info)))
+      })
+    )
+    (map-set device-rental-status
+      { device-id: device-id, rental-id: rental-id }
+      {
+        rented: true,
+        rental-date: (some burn-block-height),
+        return-date: none
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (return-device (rental-id uint))
+  (let ((rental-info (unwrap! (map-get? device-rentals { rental-id: rental-id }) ERR_CLAIM_NOT_FOUND))
+        (device-id (get device-id rental-info))
+        (rental-status (unwrap! (map-get? device-rental-status { device-id: device-id, rental-id: rental-id }) ERR_CLAIM_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (unwrap-panic (get renter rental-info))) ERR_NOT_OWNER)
+    (asserts! (get rented rental-status) ERR_NOT_AUTHORIZED)
+    (map-set device-rentals
+      { rental-id: rental-id }
+      (merge rental-info {
+        renter: none,
+        rental-start: none,
+        rental-end: none
+      })
+    )
+    (map-set device-rental-status
+      { device-id: device-id, rental-id: rental-id }
+      (merge rental-status {
+        rented: false,
+        return-date: (some burn-block-height)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (cancel-rental-listing (rental-id uint))
+  (let ((rental-info (unwrap! (map-get? device-rentals { rental-id: rental-id }) ERR_CLAIM_NOT_FOUND)))
+    (asserts! (is-eq tx-sender (get owner rental-info)) ERR_NOT_OWNER)
+    (asserts! (is-none (get renter rental-info)) ERR_NOT_AUTHORIZED)
+    (map-set device-rentals
+      { rental-id: rental-id }
+      (merge rental-info { is-active: false })
     )
     (ok true)
   )
